@@ -3,7 +3,7 @@
 # v0.6.4
 # Copyright (c) 2013 Thiago de Arruda
 # Copyright (c) 2016-2019 Eric Freese
-# 
+#
 # Permission is hereby granted, free of charge, to any person
 # obtaining a copy of this software and associated documentation
 # files (the "Software"), to deal in the Software without
@@ -12,10 +12,10 @@
 # copies of the Software, and to permit persons to whom the
 # Software is furnished to do so, subject to the following
 # conditions:
-# 
+#
 # The above copyright notice and this permission notice shall be
 # included in all copies or substantial portions of the Software.
-# 
+#
 # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
 # EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
 # OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
@@ -193,7 +193,7 @@ _zsh_autosuggest_bind_widget() {
 _zsh_autosuggest_bind_widgets() {
 	emulate -L zsh
 
- 	local widget
+	local widget
 	local ignore_widgets
 
 	ignore_widgets=(
@@ -307,9 +307,15 @@ _zsh_autosuggest_modify() {
 	# Save the contents of the buffer/postdisplay
 	local orig_buffer="$BUFFER"
 	local orig_postdisplay="$POSTDISPLAY"
+	local orig_suggestion="$ACTUAL_SUGGESTION"
+
+	if [[ ! -z $AUTOSUGGEST_REPLACE_BUFFER && ! -z $BUFFER && ! -z $ACTUAL_BUFFER ]]; then
+		BUFFER=$ACTUAL_BUFFER
+	fi
 
 	# Clear suggestion while waiting for next one
 	unset POSTDISPLAY
+	ACTUAL_SUGGESTION=$BUFFER
 
 	# Original widget may modify the buffer
 	_zsh_autosuggest_invoke_original_widget $@
@@ -317,9 +323,12 @@ _zsh_autosuggest_modify() {
 
 	emulate -L zsh
 
+	ACTUAL_BUFFER=$BUFFER
+
 	# Don't fetch a new suggestion if there's more input to be read immediately
 	if (( $PENDING > 0 || $KEYS_QUEUED_COUNT > 0 )); then
 		POSTDISPLAY="$orig_postdisplay"
+		ACTUAL_SUGGESTION="$orig_suggestion"
 		return $retval
 	fi
 
@@ -330,6 +339,7 @@ _zsh_autosuggest_modify() {
 		# If the string added matches the beginning of the postdisplay
 		if [[ "$added" = "${orig_postdisplay:0:$#added}" ]]; then
 			POSTDISPLAY="${orig_postdisplay:$#added}"
+			ACTUAL_SUGGESTION="$orig_suggestion"
 			return $retval
 		fi
 	fi
@@ -337,6 +347,7 @@ _zsh_autosuggest_modify() {
 	# Don't fetch a new suggestion if the buffer hasn't changed
 	if [[ "$BUFFER" = "$orig_buffer" ]]; then
 		POSTDISPLAY="$orig_postdisplay"
+		ACTUAL_SUGGESTION="$orig_suggestion"
 		return $retval
 	fi
 
@@ -366,16 +377,58 @@ _zsh_autosuggest_fetch() {
 	fi
 }
 
+_get_buffer_match_position() {
+	local suggestion=$1
+	local buffer_position=0
+
+	for (( i=0; i<${#suggestion}; i++ )); do
+		local letter="${suggestion:$i:1}"
+		if [[ $letter =~ '[a-zA-z]' ]]; then
+			letter=${letter:l}
+		fi
+
+		local buf_letter="${BUFFER:$buffer_position:1}"
+		if [[ $buf_letter =~ '[a-zA-z]' ]]; then
+			buf_letter=${buf_letter:l}
+		fi
+
+		if [[ $buf_letter == $letter ]]; then
+			buffer_position=$(( buffer_position + 1 ))
+		elif [[ -z $buf_letter ]]; then
+			echo $i
+			local found=1
+			break
+		fi
+	done
+
+	if [[ -z $found ]]; then
+		echo ${#suggestion}
+	fi
+}
+
 # Offer a suggestion
 _zsh_autosuggest_suggest() {
 	emulate -L zsh
 
 	local suggestion="$1"
 
-	if [[ -n "$suggestion" ]] && (( $#BUFFER )); then
+	if [[ -n "$suggestion" ]] && (( $#BUFFER )) && (( ${#suggestion} >= ${#BUFFER} )); then
+		local buf_len=$(_get_buffer_match_position $suggestion) # get position of current text in suggestion
+		if [[ ! -z "$AUTOSUGGEST_REPLACE_BUFFER" ]]; then # with this setting, the suggestion is shown over the buffer
+			# Ensure the prefix matches the suggestion
+			if [[ "$suggestion" != "$BUFFER"* ]]; then
+				BUFFER=${suggestion:0:$buf_len}
+				CURSOR=$buf_len
+			fi
 		POSTDISPLAY="${suggestion#$BUFFER}"
+			#POSTDISPLAY=$ACTUAL_BUFFER
+		else # otherwise, only remainder of suggestion is shown
+			POSTDISPLAY="${suggestion:$buf_len:${#suggestion}}"
+		fi
+		ACTUAL_SUGGESTION=$suggestion
 	else
 		unset POSTDISPLAY
+		ACTUAL_SUGGESTION=$BUFFER
 	fi
 }
 
@@ -398,10 +451,12 @@ _zsh_autosuggest_accept() {
 
 	# Only accept if the cursor is at the end of the buffer
 	# Add the suggestion to the buffer
-	BUFFER="$BUFFER$POSTDISPLAY"
+		BUFFER="$ACTUAL_SUGGESTION"
+		ACTUAL_BUFFER="$BUFFER"
 
 	# Remove the suggestion
 	unset POSTDISPLAY
+			ACTUAL_SUGGESTION=$BUFFER
 
 	# Run the original widget before manually moving the cursor so that the
 	# cursor movement doesn't make the widget do something unexpected
@@ -421,10 +476,12 @@ _zsh_autosuggest_accept() {
 # Accept the entire suggestion and execute it
 _zsh_autosuggest_execute() {
 	# Add the suggestion to the buffer
-	BUFFER="$BUFFER$POSTDISPLAY"
+	BUFFER="$ACTUAL_SUGGESTION" # replace with ACTUAL_SUGGESTION, which has the correct case, etc.
+	ACTUAL_BUFFER="$BUFFER"
 
 	# Remove the suggestion
 	unset POSTDISPLAY
+	ACTUAL_SUGGESTION=$BUFFER
 
 	# Call the original `accept-line` to handle syntax highlighting or
 	# other potential custom behavior
@@ -439,7 +496,7 @@ _zsh_autosuggest_partial_accept() {
 	local original_buffer="$BUFFER"
 
 	# Temporarily accept the suggestion.
-	BUFFER="$BUFFER$POSTDISPLAY"
+	BUFFER="$ACTUAL_SUGGESTION"
 
 	# Original widget moves the cursor
 	_zsh_autosuggest_invoke_original_widget $@
@@ -462,6 +519,8 @@ _zsh_autosuggest_partial_accept() {
 		# Restore the original buffer
 		BUFFER="$original_buffer"
 	fi
+
+	ACTUAL_BUFFER="$BUFFER"
 
 	return $retval
 }
@@ -503,7 +562,9 @@ _zsh_autosuggest_partial_accept() {
 
 _zsh_autosuggest_capture_postcompletion() {
 	# Always insert the first completion into the buffer
-	compstate[insert]=1
+	#***
+	compstate[insert]=unambiguous
+	#///
 
 	# Don't list completions
 	unset 'compstate[list]'
@@ -559,10 +620,14 @@ _zsh_autosuggest_capture_setup() {
 		}
 	fi
 
-	# Try to avoid any suggestions that wouldn't match the prefix
-	zstyle ':completion:*' matcher-list ''
-	zstyle ':completion:*' path-completion false
+#***
+	# edited to use actual zstyle
 	zstyle ':completion:*' max-errors 0 not-numeric
+	zstyle ':completion:*' completer _complete _approximate
+	zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z} m:=_ m:=- m:=.'
+	zstyle ':completion:*' file-sort modification reverse
+	zstyle ':completion:*' special-dirs false
+#///
 
 	bindkey '^I' autosuggest-capture-completion
 }
@@ -750,9 +815,6 @@ _zsh_autosuggest_fetch_suggestion() {
 	for strategy in $strategies; do
 		# Try to get a suggestion from this strategy
 		_zsh_autosuggest_strategy_$strategy "$1"
-
-		# Ensure the suggestion matches the prefix
-		[[ "$suggestion" != "$1"* ]] && unset suggestion
 
 		# Break once we've found a valid suggestion
 		[[ -n "$suggestion" ]] && break
